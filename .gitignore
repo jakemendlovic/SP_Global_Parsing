@@ -1,6 +1,6 @@
 # Ignore Input and Output folders
-/Input/
-/Output/
+/Input/*
+/Output/*
 # Byte-compiled / cache files
 __pycache__/
 *.py[cod]

@@ -1,0 +1,8 @@
+# Ignore Input and Output folders
+/Input/
+/Output/
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+# Misc
+.DS_Store

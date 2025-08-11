@@ -129,7 +129,6 @@ def process_page19_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> List[
                 lob_code = None
                 liability_type = None
 
-                # FIX: Convert to float and round to handle precision issues like '19.3999...'
                 try:
                     lob_float = float(lob_identifier_clean)
                     rounded_lob = round(lob_float, 1)
@@ -144,7 +143,7 @@ def process_page19_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> List[
                         lob_code = "21.2"
                         liability_type = 'APD'
                 except (ValueError, TypeError):
-                    continue # Ignore rows where the LOB is not a number
+                    continue
 
                 if lob_code:
                     data_row = all_rows[i+1] if lob_code == "19.3" else row
@@ -156,7 +155,9 @@ def process_page19_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> List[
                     all_lobs_data.append({
                         "YEAR": year, "Compan_Name": company_name, "NAIC": naic, "State": state,
                         "Liability": liability_type, "LOB": lob_code, "GWP": gwp, "EP": ep,
-                        "LOSSES_INCURRED": (losses or 0) + (dcc or 0)
+                        "LOSSES_INCURRED": (losses or 0) + (dcc or 0),
+                        "DIRECT_LOSSES_INC": losses,
+                        "DCC": dcc
                     })
         return all_lobs_data
     except Exception as e:
@@ -298,9 +299,9 @@ if __name__ == "__main__":
             if all_page19_data:
                 pg19_column_order = [
                     "YEAR", "Compan_Name", "NAIC", "State", "Liability", "LOB",
-                    "GWP", "EP", "LOSSES_INCURRED"
+                    "GWP", "EP", "LOSSES_INCURRED", "DIRECT_LOSSES_INC", "DCC"
                 ]
-                pg19_df = pd.DataFrame(all_page19_data)
+                pg19_df = pd.DataFrame(all_page19_data, columns=pg19_column_order)
                 pg19_df['LOB'] = pg19_df['LOB'].astype(str)
                 pg19_df = pg19_df[pg19_column_order]
                 pg19_df.drop_duplicates(subset=['NAIC', 'YEAR', 'State', 'LOB'], keep='first', inplace=True)

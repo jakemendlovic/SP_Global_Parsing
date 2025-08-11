@@ -124,19 +124,40 @@ def process_page19_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> List[
         
         for i, row in enumerate(all_rows):
             lob_identifier = get_cell_data(row, 2, ns)
-            if lob_identifier and any(lob_identifier.strip().startswith(target) for target in {"19.3", "19.4", "21.2"}):
-                lob_code = lob_identifier.strip().split(' ')[0]
-                data_row = all_rows[i+1] if lob_code == "19.3" else row
-                gwp = clean_numeric(get_cell_data(data_row, header_map["Direct Premiums Written"], ns))
-                ep = clean_numeric(get_cell_data(data_row, header_map["Direct Premiums Earned"], ns))
-                losses = clean_numeric(get_cell_data(data_row, header_map["Direct Losses Incurred"], ns))
-                dcc = clean_numeric(get_cell_data(data_row, header_map["Direct Defense and Cost Containment Expense Incurred"], ns))
-                liability_type = 'AL' if lob_code in ["19.3", "19.4"] else 'APD'
-                all_lobs_data.append({
-                    "YEAR": year, "Compan_Name": company_name, "NAIC": naic, "State": state,
-                    "Liability": liability_type, "LOB": lob_code, "GWP": gwp, "EP": ep,
-                    "LOSSES_INC": (losses or 0) + (dcc or 0)
-                })
+            if lob_identifier:
+                lob_identifier_clean = lob_identifier.strip()
+                lob_code = None
+                liability_type = None
+
+                # FIX: Convert to float and round to handle precision issues like '19.3999...'
+                try:
+                    lob_float = float(lob_identifier_clean)
+                    rounded_lob = round(lob_float, 1)
+
+                    if rounded_lob == 19.3:
+                        lob_code = "19.3"
+                        liability_type = 'AL'
+                    elif rounded_lob == 19.4:
+                        lob_code = "19.4"
+                        liability_type = 'AL'
+                    elif rounded_lob == 21.2:
+                        lob_code = "21.2"
+                        liability_type = 'APD'
+                except (ValueError, TypeError):
+                    continue # Ignore rows where the LOB is not a number
+
+                if lob_code:
+                    data_row = all_rows[i+1] if lob_code == "19.3" else row
+                    gwp = clean_numeric(get_cell_data(data_row, header_map["Direct Premiums Written"], ns))
+                    ep = clean_numeric(get_cell_data(data_row, header_map["Direct Premiums Earned"], ns))
+                    losses = clean_numeric(get_cell_data(data_row, header_map["Direct Losses Incurred"], ns))
+                    dcc = clean_numeric(get_cell_data(data_row, header_map["Direct Defense and Cost Containment Expense Incurred"], ns))
+                    
+                    all_lobs_data.append({
+                        "YEAR": year, "Compan_Name": company_name, "NAIC": naic, "State": state,
+                        "Liability": liability_type, "LOB": lob_code, "GWP": gwp, "EP": ep,
+                        "LOSSES_INCURRED": (losses or 0) + (dcc or 0)
+                    })
         return all_lobs_data
     except Exception as e:
         logging.error(f"Error in Page 19 parser for '{sheet_name}': {e}", exc_info=True)
@@ -277,9 +298,11 @@ if __name__ == "__main__":
             if all_page19_data:
                 pg19_column_order = [
                     "YEAR", "Compan_Name", "NAIC", "State", "Liability", "LOB",
-                    "GWP", "EP", "LOSSES_INC"
+                    "GWP", "EP", "LOSSES_INCURRED"
                 ]
-                pg19_df = pd.DataFrame(all_page19_data, columns=pg19_column_order)
+                pg19_df = pd.DataFrame(all_page19_data)
+                pg19_df['LOB'] = pg19_df['LOB'].astype(str)
+                pg19_df = pg19_df[pg19_column_order]
                 pg19_df.drop_duplicates(subset=['NAIC', 'YEAR', 'State', 'LOB'], keep='first', inplace=True)
                 pg19_df_sorted = pg19_df.sort_values(by=["Compan_Name", "YEAR", "State", "Liability", "LOB"]).reset_index(drop=True)
                 pg19_df_sorted.to_excel(writer, sheet_name='Page 19 Data', index=False)

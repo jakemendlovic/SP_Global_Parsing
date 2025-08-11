@@ -298,10 +298,10 @@ if __name__ == "__main__":
                 pg19_df = pd.DataFrame(all_page19_data)
                 pg19_df.drop_duplicates(subset=['NAIC', 'YEAR', 'State', 'LOB'], keep='first', inplace=True)
                 pg19_df_sorted = pg19_df.sort_values(by=["Compan_Name", "YEAR", "State", "Liability", "LOB"]).reset_index(drop=True)
-                pg19_df_sorted.to_excel(writer, sheet_name='Page 19 Data', index=False)
-                logging.info(f"\nProcessed {len(pg19_df_sorted)} rows of Page 19 data.")
+                pg19_df_sorted.to_excel(writer, sheet_name='Page 14 Data', index=False)
+                logging.info(f"\nProcessed {len(pg19_df_sorted)} rows of Page 14 data.")
             else:
-                logging.warning("No Page 19 data was processed.")
+                logging.warning("No Page 14 data was processed.")
 
             if all_sched_p_data:
                 sched_p_column_order = ["REPORT_YEAR", "Company_Name", "NAIC", "LOB", "YEAR", "EP", "LOSSES_INC", "CLAIMS"]

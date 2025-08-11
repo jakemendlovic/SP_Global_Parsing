@@ -66,7 +66,7 @@ def identify_report_type(rows: List[ET.Element], ns: Dict[str, str]) -> Optional
                 text = cell_text.upper()
                 if "EXHIBIT OF PREMIUMS AND LOSSES" in text:
                     return "Page19"
-                if "SCHEDULE P - PART 1 - SUMMARY" in text:
+                if "SCHEDULE P - PART 1" in text:
                     return "ScheduleP"
     return None
 
@@ -128,11 +128,9 @@ def process_page19_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> List[
                 lob_identifier_clean = lob_identifier.strip()
                 lob_code = None
                 liability_type = None
-
                 try:
                     lob_float = float(lob_identifier_clean)
                     rounded_lob = round(lob_float, 1)
-
                     if rounded_lob == 19.3:
                         lob_code = "19.3"
                         liability_type = 'AL'
@@ -144,20 +142,17 @@ def process_page19_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> List[
                         liability_type = 'APD'
                 except (ValueError, TypeError):
                     continue
-
                 if lob_code:
                     data_row = all_rows[i+1] if lob_code == "19.3" else row
                     gwp = clean_numeric(get_cell_data(data_row, header_map["Direct Premiums Written"], ns))
                     ep = clean_numeric(get_cell_data(data_row, header_map["Direct Premiums Earned"], ns))
                     losses = clean_numeric(get_cell_data(data_row, header_map["Direct Losses Incurred"], ns))
                     dcc = clean_numeric(get_cell_data(data_row, header_map["Direct Defense and Cost Containment Expense Incurred"], ns))
-                    
                     all_lobs_data.append({
                         "YEAR": year, "Compan_Name": company_name, "NAIC": naic, "State": state,
                         "Liability": liability_type, "LOB": lob_code, "GWP": gwp, "EP": ep,
                         "LOSSES_INCURRED": (losses or 0) + (dcc or 0),
-                        "DIRECT_LOSSES_INC": losses,
-                        "DCC": dcc
+                        "DIRECT_LOSSES_INC": losses, "DCC": dcc
                     })
         return all_lobs_data
     except Exception as e:
@@ -165,6 +160,33 @@ def process_page19_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> List[
         return []
 
 # --- Schedule P Specific Functions ---
+
+def identify_sched_p_lob(worksheet: ET.Element, rows: List[ET.Element], ns: Dict[str, str]) -> Optional[str]:
+    """
+    Identifies the Line of Business (AL or APD) from the worksheet header or name.
+    Returns None if it's an unknown type. Returns "SUMMARY" for summary sheets.
+    """
+    # Check 1: Header text in the third row
+    if len(rows) >= 3:
+        header_text = get_cell_data(rows[2], 1, ns)
+        if header_text:
+            header_text_upper = header_text.upper()
+            if "COMMERCIAL AUTO LIABILITY" in header_text_upper: return "AL"
+            if "AUTO PHYSICAL DAMAGE" in header_text_upper: return "APD"
+            if "SUMMARY" in header_text_upper: return "SUMMARY"
+
+    # Check 2: Fallback to worksheet name
+    sheet_name = worksheet.get(f'{{{ns["ss"]}}}Name').upper()
+    if "COMM'L AUTO L" in sheet_name:
+        return "AL"
+    if "AUTO PHYS" in sheet_name:
+        return "APD"
+    
+    # Check 3: Final check for summary in sheet name (e.g., PG33)
+    if "PG33" in sheet_name:
+        return "SUMMARY"
+
+    return None
 
 def find_schedule_p_headers(rows: List[ET.Element], ns: Dict[str, str]) -> Dict[str, int]:
     number_to_ss_index_map = {}
@@ -190,7 +212,7 @@ def find_schedule_p_headers(rows: List[ET.Element], ns: Dict[str, str]) -> Dict[
         "CLAIMS": number_to_ss_index_map.get(25)
     }
 
-def process_schedule_p_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> List[Dict[str, Any]]:
+def process_schedule_p_worksheet(worksheet: ET.Element, ns: Dict[str, str], lob: str) -> List[Dict[str, Any]]:
     sheet_name = worksheet.get(f'{{{ns["ss"]}}}Name')
     parsed_data = []
     try:
@@ -201,46 +223,27 @@ def process_schedule_p_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> L
         match = re.search(r"(\d{4}) OF THE (.*?) ?(?:\(NAIC #(\S+)\))?$", header_string)
         if not match: return []
         report_year, company_name, naic = int(match.group(1)), match.group(2).strip(), match.group(3).strip(')') if match.group(3) else "N/A"
-        
         column_map = find_schedule_p_headers(all_rows, ns)
         if not all(column_map.values()): return []
-        
         prior_row_indices = []
         for i, row in enumerate(all_rows):
             year_val = get_cell_data(row, 3, ns) 
             if year_val and "Prior" in year_val:
                 prior_row_indices.append(i)
-        
-        if len(prior_row_indices) < 3:
-            logging.warning(f"Could not find all 3 data blocks in worksheet: {sheet_name}. Skipping.")
-            return []
-
-        start_row_ep = prior_row_indices[0]
-        start_row_claims = prior_row_indices[1]
-        start_row_losses = prior_row_indices[2]
-
+        if len(prior_row_indices) < 3: return []
+        start_row_ep, start_row_claims, start_row_losses = prior_row_indices[0], prior_row_indices[1], prior_row_indices[2]
         for i in range(12):
-            row_index_ep = start_row_ep + i
-            row_index_claims = start_row_claims + i
-            row_index_losses = start_row_losses + i
-            
-            if not all(idx < len(all_rows) for idx in [row_index_ep, row_index_claims, row_index_losses]):
-                break
-            
-            row_ep = all_rows[row_index_ep]
-            row_claims = all_rows[row_index_claims]
-            row_losses = all_rows[row_index_losses]
-            
+            row_index_ep, row_index_claims, row_index_losses = start_row_ep + i, start_row_claims + i, start_row_losses + i
+            if not all(idx < len(all_rows) for idx in [row_index_ep, row_index_claims, row_index_losses]): break
+            row_ep, row_claims, row_losses = all_rows[row_index_ep], all_rows[row_index_claims], all_rows[row_index_losses]
             year = get_cell_data(row_ep, 3, ns)
             if not year: continue
-
             parsed_data.append({
-                "REPORT_YEAR": report_year, "Company_Name": company_name, "NAIC": naic, "YEAR": year,
+                "REPORT_YEAR": report_year, "Company_Name": company_name, "NAIC": naic, "LOB": lob, "YEAR": year,
                 "EP": clean_numeric(get_cell_data(row_ep, column_map["EP"], ns)),
                 "LOSSES_INC": clean_numeric(get_cell_data(row_losses, column_map["LOSSES_INC"], ns)),
                 "CLAIMS": clean_numeric(get_cell_data(row_claims, column_map["CLAIMS"], ns))
             })
-            
         return parsed_data
     except Exception as e:
         logging.error(f"Error in Schedule P parser for '{sheet_name}': {e}", exc_info=True)
@@ -272,38 +275,27 @@ if __name__ == "__main__":
                 ns = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
                 worksheets = root.findall('ss:Worksheet', ns)
                 
-                file_type_identified = False
                 for worksheet in worksheets:
+                    sheet_name = worksheet.get(f'{{{ns["ss"]}}}Name')
                     all_rows = list(worksheet.findall('.//ss:Row', ns))
                     report_type = identify_report_type(all_rows, ns)
                     
                     if report_type == "Page19":
-                        if not file_type_identified:
-                            logging.info(f"Identified file '{os.path.basename(file_path)}' as Page19")
-                            file_type_identified = True
                         all_page19_data.extend(process_page19_worksheet(worksheet, ns))
                     elif report_type == "ScheduleP":
-                        if not file_type_identified:
-                            logging.info(f"Identified file '{os.path.basename(file_path)}' as ScheduleP")
-                            file_type_identified = True
-                        all_sched_p_data.extend(process_schedule_p_worksheet(worksheet, ns))
-
-                if not file_type_identified:
-                     logging.warning(f"Could not determine report type for file: {file_path}. Skipping.")
-
+                        lob = identify_sched_p_lob(worksheet, all_rows, ns)
+                        if lob in ["AL", "APD"]:
+                            logging.info(f"  -> Processing Schedule P - {lob} sheet: {sheet_name}...")
+                            all_sched_p_data.extend(process_schedule_p_worksheet(worksheet, ns, lob))
+                        else:
+                            logging.info(f"  -> Skipping Schedule P - Summary/Other sheet: {sheet_name}")
             except Exception as e:
                 logging.critical(f"Fatal error processing file {file_path}: {e}", exc_info=True)
 
         # --- Final Output Generation ---
         with pd.ExcelWriter(output_filename, engine='xlsxwriter') as writer:
             if all_page19_data:
-                pg19_column_order = [
-                    "YEAR", "Compan_Name", "NAIC", "State", "Liability", "LOB",
-                    "GWP", "EP", "LOSSES_INCURRED", "DIRECT_LOSSES_INC", "DCC"
-                ]
-                pg19_df = pd.DataFrame(all_page19_data, columns=pg19_column_order)
-                pg19_df['LOB'] = pg19_df['LOB'].astype(str)
-                pg19_df = pg19_df[pg19_column_order]
+                pg19_df = pd.DataFrame(all_page19_data)
                 pg19_df.drop_duplicates(subset=['NAIC', 'YEAR', 'State', 'LOB'], keep='first', inplace=True)
                 pg19_df_sorted = pg19_df.sort_values(by=["Compan_Name", "YEAR", "State", "Liability", "LOB"]).reset_index(drop=True)
                 pg19_df_sorted.to_excel(writer, sheet_name='Page 19 Data', index=False)
@@ -312,8 +304,9 @@ if __name__ == "__main__":
                 logging.warning("No Page 19 data was processed.")
 
             if all_sched_p_data:
-                sched_p_df = pd.DataFrame(all_sched_p_data)
-                sched_p_df_sorted = sched_p_df.sort_values(by=["Company_Name", "REPORT_YEAR", "YEAR"]).reset_index(drop=True)
+                sched_p_column_order = ["REPORT_YEAR", "Company_Name", "NAIC", "LOB", "YEAR", "EP", "LOSSES_INC", "CLAIMS"]
+                sched_p_df = pd.DataFrame(all_sched_p_data, columns=sched_p_column_order)
+                sched_p_df_sorted = sched_p_df.sort_values(by=["Company_Name", "REPORT_YEAR", "LOB", "YEAR"]).reset_index(drop=True)
                 sched_p_df_sorted.to_excel(writer, sheet_name='Schedule P Data', index=False)
                 logging.info(f"Processed {len(sched_p_df_sorted)} rows of Schedule P data.")
             else:

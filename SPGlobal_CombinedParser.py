@@ -15,20 +15,22 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def clean_numeric(value: Any) -> Optional[float]:
     """
-    Cleans a value by removing commas, handling parentheses for negatives,
-    and converting it to a float. Returns None if conversion fails.
+    Cleans a value by removing commas, handling parentheses, and special whitespace
+    characters before converting it to a float. Returns None if conversion fails.
     """
     if value is None or not isinstance(value, str):
         return None
     
-    value = value.strip()
-    if 'XXX' in value.upper() or value == "" or value == 'NA':
+    cleaned_value = value.replace('\xa0', '').strip()
+    
+    if 'XXX' in cleaned_value.upper() or cleaned_value == "" or cleaned_value == 'NA':
         return None
         
     try:
-        if value.startswith('(') and value.endswith(')'):
-            value = '-' + value[1:-1]
-        return float(value.replace(',', ''))
+        if cleaned_value.startswith('(') and cleaned_value.endswith(')'):
+            cleaned_value = cleaned_value[1:-1]
+            
+        return float(cleaned_value.replace(',', ''))
     except (ValueError, AttributeError):
         return None
 
@@ -162,11 +164,6 @@ def process_page19_worksheet(worksheet: ET.Element, ns: Dict[str, str]) -> List[
 # --- Schedule P Specific Functions ---
 
 def identify_sched_p_lob(worksheet: ET.Element, rows: List[ET.Element], ns: Dict[str, str]) -> Optional[str]:
-    """
-    Identifies the Line of Business (AL or APD) from the worksheet header or name.
-    Returns None if it's an unknown type. Returns "SUMMARY" for summary sheets.
-    """
-    # Check 1: Header text in the third row
     if len(rows) >= 3:
         header_text = get_cell_data(rows[2], 1, ns)
         if header_text:
@@ -174,43 +171,48 @@ def identify_sched_p_lob(worksheet: ET.Element, rows: List[ET.Element], ns: Dict
             if "COMMERCIAL AUTO LIABILITY" in header_text_upper: return "AL"
             if "AUTO PHYSICAL DAMAGE" in header_text_upper: return "APD"
             if "SUMMARY" in header_text_upper: return "SUMMARY"
-
-    # Check 2: Fallback to worksheet name
     sheet_name = worksheet.get(f'{{{ns["ss"]}}}Name').upper()
-    if "COMM'L AUTO L" in sheet_name:
-        return "AL"
-    if "AUTO PHYS" in sheet_name:
-        return "APD"
-    
-    # Check 3: Final check for summary in sheet name (e.g., PG33)
-    if "PG33" in sheet_name:
-        return "SUMMARY"
-
+    if "COMM'L AUTO L" in sheet_name: return "AL"
+    if "AUTO PHYS" in sheet_name: return "APD"
+    if "PG33" in sheet_name: return "SUMMARY"
     return None
 
 def find_schedule_p_headers(rows: List[ET.Element], ns: Dict[str, str]) -> Dict[str, int]:
-    number_to_ss_index_map = {}
-    targets_to_find = {'1', '25', '26'}
-    found_targets = set()
-    for row in rows[:50]:
-        current_index = 1
-        for cell in row.findall('ss:Cell', ns):
-            idx_attr = cell.get(f'{{{ns["ss"]}}}Index')
-            if idx_attr: current_index = int(idx_attr)
-            data_element = cell.find('ss:Data', ns)
-            if data_element is not None and data_element.text:
-                text = data_element.text.strip()
-                if text in targets_to_find and text not in found_targets:
-                    number_to_ss_index_map[int(text)] = current_index
-                    found_targets.add(text)
-            current_index += 1
-        if len(found_targets) == len(targets_to_find): break
-    if len(found_targets) != len(targets_to_find): return {}
-    return {
-        "EP": number_to_ss_index_map.get(1),
-        "LOSSES_INC": number_to_ss_index_map.get(26),
-        "CLAIMS": number_to_ss_index_map.get(25)
+    """
+    Robustly finds column indices for Schedule P data by locating header text,
+    which is more reliable than fixed column numbers.
+    """
+    header_map = {}
+    header_anchors = {
+        "EP": ("Premiums Earned", "Direct and Assumed"),
+        "CLAIMS": ("Number of Claims", "Direct and Assumed"),
+        "LOSSES_INC": ("Total Losses and Loss Expenses Incurred", "Direct and Assumed")
     }
+
+    for key, (main_header, sub_header) in header_anchors.items():
+        for i, row in enumerate(rows[:50]):
+            current_index = 1
+            for cell in row.findall('ss:Cell', ns):
+                idx_attr = cell.get(f'{{{ns["ss"]}}}Index')
+                if idx_attr: current_index = int(idx_attr)
+                data_element = cell.find('ss:Data', ns)
+                if data_element is not None and data_element.text and main_header in data_element.text:
+                    for j in range(1, 4):
+                        if (i + j) < len(rows):
+                            next_row = rows[i + j]
+                            sub_current_index = 1
+                            for sub_cell in next_row.findall('ss:Cell', ns):
+                                sub_idx_attr = sub_cell.get(f'{{{ns["ss"]}}}Index')
+                                if sub_idx_attr: sub_current_index = int(sub_idx_attr)
+                                sub_data_element = sub_cell.find('ss:Data', ns)
+                                if sub_data_element is not None and sub_data_element.text and sub_header in sub_data_element.text:
+                                    header_map[key] = sub_current_index
+                                    break
+                                sub_current_index += 1
+                    if key in header_map: break
+            if key in header_map: break
+            current_index += 1
+    return header_map
 
 def process_schedule_p_worksheet(worksheet: ET.Element, ns: Dict[str, str], lob: str) -> List[Dict[str, Any]]:
     sheet_name = worksheet.get(f'{{{ns["ss"]}}}Name')
@@ -223,15 +225,21 @@ def process_schedule_p_worksheet(worksheet: ET.Element, ns: Dict[str, str], lob:
         match = re.search(r"(\d{4}) OF THE (.*?) ?(?:\(NAIC #(\S+)\))?$", header_string)
         if not match: return []
         report_year, company_name, naic = int(match.group(1)), match.group(2).strip(), match.group(3).strip(')') if match.group(3) else "N/A"
+        
         column_map = find_schedule_p_headers(all_rows, ns)
-        if not all(column_map.values()): return []
+        if len(column_map) < 3:
+            logging.error(f"Could not find all required headers (EP, CLAIMS, LOSSES_INC) in {sheet_name}. Skipping.")
+            return []
+        
         prior_row_indices = []
         for i, row in enumerate(all_rows):
             year_val = get_cell_data(row, 3, ns) 
             if year_val and "Prior" in year_val:
                 prior_row_indices.append(i)
+        
         if len(prior_row_indices) < 3: return []
         start_row_ep, start_row_claims, start_row_losses = prior_row_indices[0], prior_row_indices[1], prior_row_indices[2]
+        
         for i in range(12):
             row_index_ep, row_index_claims, row_index_losses = start_row_ep + i, start_row_claims + i, start_row_losses + i
             if not all(idx < len(all_rows) for idx in [row_index_ep, row_index_claims, row_index_losses]): break
@@ -298,10 +306,10 @@ if __name__ == "__main__":
                 pg19_df = pd.DataFrame(all_page19_data)
                 pg19_df.drop_duplicates(subset=['NAIC', 'YEAR', 'State', 'LOB'], keep='first', inplace=True)
                 pg19_df_sorted = pg19_df.sort_values(by=["Compan_Name", "YEAR", "State", "Liability", "LOB"]).reset_index(drop=True)
-                pg19_df_sorted.to_excel(writer, sheet_name='Page 14 Data', index=False)
-                logging.info(f"\nProcessed {len(pg19_df_sorted)} rows of Page 14 data.")
+                pg19_df_sorted.to_excel(writer, sheet_name='Page 19 Data', index=False)
+                logging.info(f"\nProcessed {len(pg19_df_sorted)} rows of Page 19 data.")
             else:
-                logging.warning("No Page 14 data was processed.")
+                logging.warning("No Page 19 data was processed.")
 
             if all_sched_p_data:
                 sched_p_column_order = ["REPORT_YEAR", "Company_Name", "NAIC", "LOB", "YEAR", "EP", "LOSSES_INC", "CLAIMS"]
